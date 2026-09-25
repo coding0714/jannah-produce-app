@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jannah's Fresh Farm - Live Produce System</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Supabase CDN Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    // === SUPABASE CONNECTION ===
+    const SUPABASE_URL = "https://wwjnadfxvhymssgudje.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind3am5hZGZ4dmh5cm1zc2d1ZGplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAyODA4NzgsImV4cCI6MjEwNTg1Njg3OH0.RP4d8I6OQ5n00SiaAhaAs7ugF422Vd9E9RVD5R2SN28";
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    function App() {
+      const [terminal, setTerminal] = useState("client"); // 'client' | 'master' | 'driver'
+      const [products, setProducts] = useState([]);
+      const [orders, setOrders] = useState([]);
+      const [cart, setCart] = useState({});
+      const [clientName, setClientName] = useState("OT Tartinery Olympic Tower");
+      const [notes, setNotes] = useState("");
+      const [truckName, setTruckName] = useState("Truck 1");
+      const [isSubmitting, setIsSubmitting] = useState(false);
+      const [statusMsg, setStatusMsg] = useState("");
+
+      // Fetch products and initial orders
+      const fetchInitialData = async () => {
+        const { data: prods } = await supabase.from('products').select('*');
+        if (prods) setProducts(prods);
+
+        loadOrders();
+      };
+
+      const loadOrders = async () => {
+        const { data: orderData } = await supabase
+          .from('orders')
+          .select(`
+            id,
+            client_name,
+            truck_name,
+            notes,
+            created_at,
+            order_items (
+              product_id,
+              quantity
+            )
+          `)
+          .order('created_at', { ascending: false });
+
+        if (orderData) setOrders(orderData);
+      };
+
+      useEffect(() => {
+        fetchInitialData();
+
+        // Listen for live orders placed from other phones/computers
+        const channel = supabase
+          .channel('schema-db-changes')
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, () => {
+            loadOrders();
+            setStatusMsg("New order received in real-time!");
+            setTimeout(() => setStatusMsg(""), 4000);
+          })
+          .subscribe();
+
+        return () => {
+          supabase.removeChannel(channel);
+        };
+      }, []);
+
+      // Master Buy List calculation
+      const masterBuyList = useMemo(() => {
+        const map = {};
+        orders.forEach(ord => {
+          (ord.order_items || []).forEach(item => {
+            const prod = products.find(p => p.id === item.product_id);
+            if (!prod) return;
+            if (!map[prod.id]) {
+              map[prod.id] = { ...prod, totalQty: 0, byTruck: { 'Truck 1': 0, 'Truck 2': 0 } };
+            }
+            map[prod.id].totalQty += item.quantity;
+            map[prod.id].byTruck[ord.truck_name] = (map[prod.id].byTruck[ord.truck_name] || 0) + item.quantity;
+          });
+        });
+        return Object.values(map).sort((a, b) => b.totalQty - a.totalQty);
+      }, [orders, products]);
+
+      const updateCart = (pId, delta) => {
+        setCart(prev => {
+          const current = prev[pId] || 0;
+          const updated = Math.max(0, current + delta);
+          if (updated === 0) {
+            const next = { ...prev };
+            delete next[pId];
+            return next;
+          }
+          return { ...prev, [pId]: updated };
+        });
+      };
+
+      const submitOrder = async (e) => {
+        e.preventDefault();
+        const items = Object.entries(cart);
+        if (items.length === 0) return;
+
+        setIsSubmitting(true);
+        try {
+          const { data: ord, error: ordErr } = await supabase
+            .from('orders')
+            .insert([{ client_name: clientName, truck_name: truckName, notes }])
+            .select()
+            .single();
+
+          if (ordErr) throw ordErr;
+
+          const lineInserts = items.map(([pId, qty]) => ({
+            order_id: ord.id,
+            product_id: pId,
+            quantity: qty
+          }));
+
+          const { error: itemErr } = await supabase.from('order_items').insert(lineInserts);
+          if (itemErr) throw itemErr;
+
+          setCart({});
+          setNotes("");
+          setStatusMsg("Order placed! Check the Master Hub on your computer.");
+          setTimeout(() => setStatusMsg(""), 5000);
+        } catch (err) {
+          alert("Error placing order: " + err.message);
+        } finally {
+          setIsSubmitting(false);
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col bg-slate-50">
+          {/* Top Switcher Bar */}
+          <nav className="bg-slate-900 text-white px-4 py-3 sticky top-0 z-50 flex flex-wrap justify-between items-center gap-2">
+            <div className="flex items-center space-x-2">
+              <span className="font-black text-emerald-400">FRESH<span className="text-white">HUB</span></span>
+              <span className="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700">Jannah's Farm</span>
+            </div>
+
+            <div className="flex items-center bg-slate-800 p-1 rounded-lg border border-slate-700 text-xs font-semibold">
+              <button
+                onClick={() => setTerminal("client")}
+                className={`px-3 py-1.5 rounded-md ${terminal === 'client' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}
+              >
+                1. Client App
+              </button>
+              <button
+                onClick={() => setTerminal("master")}
+                className={`px-3 py-1.5 rounded-md ${terminal === 'master' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}
+              >
+                2. Master Hub ({orders.length})
+              </button>
+              <button
+                onClick={() => setTerminal("driver")}
+                className={`px-3 py-1.5 rounded-md ${terminal === 'driver' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}
+              >
+                3. Driver Terminal
+              </button>
+            </div>
+          </nav>
+
+          {statusMsg && (
+            <div className="bg-emerald-600 text-white text-center py-2 px-4 text-xs font-bold animate-pulse">
+              {statusMsg}
+            </div>
+          )}
+
+          <div className="max-w-5xl mx-auto w-full p-4 flex-1">
+            {/* TERMINAL 1: CLIENT ORDER APP */}
+            {terminal === 'client' && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="md:col-span-2 space-y-4">
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900 font-medium">
+                    Order Cutoff: 11:30 PM • Produce sourced fresh at 4:00 AM wholesale terminal.
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {products.map(p => {
+                      const qty = cart[p.id] || 0;
+                      return (
+                        <div key={p.id} className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm flex flex-col justify-between">
+                          <div>
+                            <div className="flex justify-between items-start">
+                              <span className="text-[10px] font-bold font-mono text-slate-400">#{p.code}</span>
+                              <span className="text-xs font-mono font-bold text-emerald-700">${Number(p.price).toFixed(2)}</span>
+                            </div>
+                            <h4 className="font-bold text-slate-900 text-sm mt-0.5">{p.name}</h4>
+                            <p className="text-xs text-slate-500 font-medium">{p.pack}</p>
+                          </div>
+
+                          <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between">
+                            <span className="text-xs text-slate-400 font-medium">Pack Qty</span>
+                            <div className="flex items-center space-x-2">
+                              <button
+                                type="button"
+                                onClick={() => updateCart(p.id, -1)}
+                                className="w-8 h-8 rounded-lg bg-slate-100 text-slate-700 font-bold hover:bg-slate-200"
+                              >
+                                -
+                              </button>
+                              <span className="w-6 text-center font-mono font-bold text-sm">{qty}</span>
+                              <button
+                                type="button"
+                                onClick={() => updateCart(p.id, 1)}
+                                className="w-8 h-8 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Cart Column */}
+                <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm h-fit space-y-4">
+                  <h3 className="font-bold text-sm text-slate-900 pb-2 border-b border-slate-100">Your Produce Cart</h3>
+                  
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">Select Client Account</label>
+                    <select
+                      value={clientName}
+                      onChange={(e) => setClientName(e.target.value)}
+                      className="w-full text-xs p-2 border border-slate-300 rounded-lg outline-none bg-slate-50 font-medium"
+                    >
+                      <option>OT Tartinery Olympic Tower</option>
+                      <option>GC Tartinery Grand Central</option>
+                      <option>CC Tartinery Columbus</option>
+                      <option>90 PK Tartinery Park</option>
+                      <option>Milk N' Honey</option>
+                      <option>Liberty Tartinery</option>
+                      <option>Mohamed Kaoud Push Cart</option>
+                      <option>Elsayed Zaher Push Cart</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">Assigned Route</label>
+                    <select
+                      value={truckName}
+                      onChange={(e) => setTruckName(e.target.value)}
+                      className="w-full text-xs p-2 border border-slate-300 rounded-lg outline-none bg-slate-50 font-medium"
+                    >
+                      <option value="Truck 1">Truck 1 (Queens / Brooklyn)</option>
+                      <option value="Truck 2">Truck 2 (Manhattan)</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {Object.entries(cart).length === 0 ? (
+                      <p className="text-xs text-slate-400 py-4 text-center">Cart is empty</p>
+                    ) : (
+                      Object.entries(cart).map(([pId, qty]) => {
+                        const p = products.find(x => x.id === pId);
+                        if (!p) return null;
+                        return (
+                          <div key={pId} className="flex justify-between items-center text-xs bg-slate-50 p-2 rounded">
+                            <span className="font-medium text-slate-800">{p.name}</span>
+                            <span className="font-mono font-bold text-emerald-700">{qty}x</span>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <textarea
+                    rows={2}
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Delivery notes..."
+                    className="w-full text-xs p-2 border border-slate-300 rounded-lg outline-none"
+                  />
+
+                  <button
+                    disabled={isSubmitting || Object.keys(cart).length === 0}
+                    onClick={submitOrder}
+                    className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs shadow disabled:opacity-50"
+                  >
+                    {isSubmitting ? "Sending..." : "Send Order to Market Hub"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* TERMINAL 2: MASTER DISPATCHER BOARD */}
+            {terminal === 'master' && (
+              <div className="space-y-6">
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                  <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
+                    <div>
+                      <h3 className="font-bold text-sm">Master Buy Board (All Accounts Aggregated)</h3>
+                      <p className="text-[11px] text-slate-400">Total volume to purchase at wholesale terminal</p>
+                    </div>
+                    <span className="text-xs bg-emerald-600 text-white px-2 py-0.5 rounded font-mono font-bold">
+                      {orders.length} Orders Synced
+                    </span>
+                  </div>
+
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-100 border-b border-slate-200 text-slate-600 font-bold uppercase">
+                      <tr>
+                        <th className="p-3">Produce Item</th>
+                        <th className="p-3">Pack</th>
+                        <th className="p-3 text-center">Truck 1</th>
+                        <th className="p-3 text-center">Truck 2</th>
+                        <th className="p-3 text-center bg-slate-200 text-slate-900">Total Needed</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {masterBuyList.length === 0 ? (
+                        <tr><td colSpan={5} className="p-6 text-center text-slate-400">No orders placed yet. Place an order in Terminal 1.</td></tr>
+                      ) : (
+                        masterBuyList.map(item => (
+                          <tr key={item.id} className="hover:bg-slate-50 font-medium">
+                            <td className="p-3 font-bold text-slate-900">{item.name}</td>
+                            <td className="p-3 text-slate-500 font-mono">{item.pack}</td>
+                            <td className="p-3 text-center font-mono font-bold text-blue-700">{item.byTruck['Truck 1'] || 0}</td>
+                            <td className="p-3 text-center font-mono font-bold text-emerald-700">{item.byTruck['Truck 2'] || 0}</td>
+                            <td className="p-3 text-center font-mono font-black text-sm bg-slate-50">{item.totalQty}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Recent Order Slips */}
+                <div>
+                  <h4 className="font-bold text-xs uppercase text-slate-500 mb-2">Live Incoming Orders</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    {orders.map(ord => (
+                      <div key={ord.id} className="bg-white border border-slate-200 rounded-lg p-3 text-xs shadow-sm">
+                        <div className="flex justify-between items-start font-bold border-b border-slate-100 pb-1.5 mb-1.5">
+                          <span>{ord.client_name}</span>
+                          <span className="text-[10px] bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded font-mono">{ord.truck_name}</span>
+                        </div>
+                        <div className="space-y-1">
+                          {(ord.order_items || []).map((it, idx) => {
+                            const p = products.find(x => x.id === it.product_id);
+                            return (
+                              <div key={idx} className="flex justify-between text-slate-600">
+                                <span>{p ? p.name : it.product_id}</span>
+                                <span className="font-mono font-bold text-slate-900">{it.quantity}x</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TERMINAL 3: DRIVER RUNNER TERMINAL */}
+            {terminal === 'driver' && (
+              <div className="space-y-4">
+                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex justify-between items-center">
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-900">Driver Terminal Loading Checklist</h3>
+                    <p className="text-xs text-slate-500">Filtered for morning truck loading</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {['Truck 1', 'Truck 2'].map(trk => (
+                    <div key={trk} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm space-y-3">
+                      <div className="flex justify-between items-center border-b border-slate-200 pb-2">
+                        <h4 className="font-bold text-sm text-slate-900">{trk} Manifest</h4>
+                        <span className="text-xs font-mono bg-slate-100 text-slate-800 px-2 py-0.5 rounded font-bold">
+                          {orders.filter(o => o.truck_name === trk).length} Stops
+                        </span>
+                      </div>
+
+                      <div className="space-y-2">
+                        {masterBuyList
+                          .filter(it => it.byTruck[trk] > 0)
+                          .map(it => (
+                            <label key={it.id} className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-200 cursor-pointer">
+                              <div className="flex items-center space-x-2">
+                                <input type="checkbox" className="w-4 h-4 accent-emerald-600 rounded" />
+                                <div>
+                                  <p className="text-xs font-bold text-slate-800">{it.name}</p>
+                                  <p className="text-[10px] text-slate-500">{it.pack}</p>
+                                </div>
+                              </div>
+                              <span className="font-mono font-black text-sm text-slate-900">{it.byTruck[trk]}x</span>
+                            </label>
+                          ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
